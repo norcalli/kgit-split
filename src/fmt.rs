@@ -103,3 +103,25 @@ impl std::fmt::Display for ThousandsFloat {
         Ok(())
     }
 }
+
+pub struct FmtFn<F>(pub F)
+where
+    F: Fn(&mut std::fmt::Formatter<'_>) -> std::fmt::Result;
+
+impl<F> std::fmt::Display for FmtFn<F>
+where
+    F: Fn(&mut std::fmt::Formatter<'_>) -> std::fmt::Result,
+{
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        (self.0)(f)
+    }
+}
+
+impl<F> From<F> for FmtFn<F>
+where
+    F: Fn(&mut std::fmt::Formatter<'_>) -> std::fmt::Result,
+{
+    fn from(v: F) -> Self {
+        FmtFn(v)
+    }
+}

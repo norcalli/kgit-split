@@ -299,6 +299,7 @@ fn main() -> Result<()> {
 
             #[derive(Hash, Default)]
             struct UiState {
+                allow_partial: bool,
                 active_mode: UiMode,
                 previous_modes: Vec<UiMode>,
                 messages: BTreeMap<CommitId, CommitInfo>,
@@ -326,6 +327,10 @@ fn main() -> Result<()> {
                 pub fn all_hunks_assigned(&self, hunk_count: usize) -> bool {
                     self.hunk_commits.len() == hunk_count
                         && self.hunk_commits.iter().all(|c| c.is_some())
+                }
+
+                pub fn should_save_commits(&self, hunk_count: usize) -> bool {
+                    self.allow_partial || self.all_hunks_assigned(hunk_count)
                 }
 
                 pub fn set_hunk_commit(&mut self, hunk_idx: usize, commit_id: CommitId) {
@@ -389,6 +394,23 @@ fn main() -> Result<()> {
                             termion::cursor::Goto(1, 1),
                             termion::clear::All
                         )?;
+                        writeln!(
+                            draw_buffer,
+                            "{x}/{n} hunks assigned{partial}",
+                            x = ui_state.hunk_commits.iter().filter(|h| h.is_some()).count(),
+                            n = hunks.len(),
+                            partial = ui_state
+                                .allow_partial
+                                .then(|| FmtFn(|f| {
+                                    write!(
+                                        f,
+                                        " {color}ALLOW PARTIAL{reset}",
+                                        color = termion::color::Fg(termion::color::Yellow),
+                                        reset = termion::color::Fg(termion::color::Reset),
+                                    )
+                                }))
+                                .or_display("")
+                        )?;
                         for (id, CommitInfo { commit_message }) in ui_state.messages.iter() {
                             writeln!(
                                 draw_buffer,
@@ -427,11 +449,18 @@ fn main() -> Result<()> {
                                     ui_state.hunk_commits.get(*active_hunk).copied().flatten();
                                 let commit_message = commit
                                     .map(|commit| {
-                                        ui_state.messages[&commit]
-                                            .commit_message
-                                            .split('\n')
-                                            .next()
-                                            .unwrap()
+                                        let messages = &ui_state.messages;
+                                        FmtFn(move |f| {
+                                            write!(
+                                                f,
+                                                "[{commit}] {}",
+                                                messages[&commit]
+                                                    .commit_message
+                                                    .split('\n')
+                                                    .next()
+                                                    .unwrap()
+                                            )
+                                        })
                                     })
                                     .into_or_display("---");
                                 let header_line = header.split('\n').next().unwrap();
@@ -548,8 +577,14 @@ fn main() -> Result<()> {
                         UiMode::Viewing { active_hunk } => {
                             let active_hunk = *active_hunk;
                             match key {
+                                termion::event::Key::Ctrl('f') => {
+                                    ui_state.allow_partial = !ui_state.allow_partial;
+                                }
+                                termion::event::Key::Ctrl('p') => {
+                                    ui_state.allow_partial = true;
+                                }
                                 termion::event::Key::Ctrl('s')
-                                    if ui_state.all_hunks_assigned(hunks.len()) =>
+                                    if ui_state.should_save_commits(hunks.len()) =>
                                 {
                                     break 'ui_loop;
                                 }
@@ -590,13 +625,12 @@ fn main() -> Result<()> {
                         }
                     }
                 } // 'ui_loop
-                if ui_state.all_hunks_assigned(hunks.len()) {
+                if ui_state.should_save_commits(hunks.len()) {
                     let hunks_for_commit: BTreeMap<CommitId, Vec<usize>> = ui_state
                         .hunk_commits
                         .into_iter()
-                        .map(|id| id.expect("Already checked in all_hunks_assigned"))
                         .enumerate()
-                        .map(|(hunk_id, commit_id)| (commit_id, hunk_id))
+                        .flat_map(|(hunk_id, commit_id)| Some((commit_id?, hunk_id)))
                         .into_group_map()
                         .into_iter()
                         .collect();
