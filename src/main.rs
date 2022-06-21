@@ -143,15 +143,9 @@ fn get_output_with_input(
     command: &mut Command,
     input: impl FnOnce(&mut std::process::ChildStdin) -> Result<()>,
 ) -> Result<String> {
-    command.stdin(std::process::Stdio::piped());
-    let mut child = command.spawn()?;
-    {
-        let child_stdin = child
-            .stdin
-            .as_mut()
-            .ok_or_else(|| anyhow::anyhow!("No stdin?"))?;
-        input(child_stdin)?;
-    }
+    command.stderr(std::process::Stdio::piped());
+    command.stdout(std::process::Stdio::piped());
+    let child = spawn_with_input(command, input)?;
     let output = child.wait_with_output()?;
     anyhow::ensure!(
         output.status.success(),
@@ -161,6 +155,22 @@ fn get_output_with_input(
     let mut s = vec_to_utf8(output.stdout);
     s.truncate(s.trim_end().len());
     Ok(s)
+}
+
+fn spawn_with_input(
+    command: &mut Command,
+    input: impl FnOnce(&mut std::process::ChildStdin) -> Result<()>,
+) -> Result<std::process::Child> {
+    command.stdin(std::process::Stdio::piped());
+    let mut child = command.spawn()?;
+    {
+        let child_stdin = child
+            .stdin
+            .as_mut()
+            .ok_or_else(|| anyhow::anyhow!("No stdin?"))?;
+        input(child_stdin)?;
+    }
+    Ok(child)
 }
 
 fn rev_parse(input: impl AsRef<str>) -> Result<String> {
@@ -581,8 +591,22 @@ fn main() -> Result<()> {
                                     ui_state.allow_partial = !ui_state.allow_partial;
                                 }
                                 termion::event::Key::Ctrl('p') => {
-                                    ui_state.allow_partial = true;
+                                    let _ = spawn_with_input(
+                                        &mut Command::new(
+                                            std::env::var("PAGER")
+                                                .unwrap_or_else(|_| "less".to_string()),
+                                        ),
+                                        |stdin| {
+                                            let (header, hunk_body) = &hunks[active_hunk];
+                                            write!(stdin, "{header}\n{hunk_body}")?;
+                                            Ok(())
+                                        },
+                                    )
+                                    .and_then(|mut child| Ok(child.wait()?));
                                 }
+                                // TODO for editor?
+                                // TODO allow splitting a hunk?
+                                // termion::event::Key::Ctrl('e') => {}
                                 termion::event::Key::Ctrl('s')
                                     if ui_state.should_save_commits(hunks.len()) =>
                                 {
@@ -637,10 +661,7 @@ fn main() -> Result<()> {
                     for (commit_id, hunk_ids) in hunks_for_commit.into_iter() {
                         let commit_info = &ui_state.messages[&commit_id];
                         let output = get_output_with_input(
-                            Command::new("patch")
-                                .args(&["-p1", "-R"])
-                                .stderr(std::process::Stdio::piped())
-                                .stdout(std::process::Stdio::piped()),
+                            Command::new("patch").args(&["-p1", "-R"]),
                             |stdin| {
                                 for hunk_id in hunk_ids.into_iter() {
                                     let (header, hunk_body) = &hunks[hunk_id];
