@@ -186,6 +186,31 @@ fn rev_parse(input: impl AsRef<str>) -> Result<String> {
     //     Ok(s)
 }
 
+fn render_hunk(hunk: &str, max_lines: usize) -> impl std::fmt::Display + '_ {
+    FmtFn(move |f| {
+        for line in hunk.split('\n').take(max_lines) {
+            if let Some(line) = line.strip_prefix("+") {
+                writeln!(
+                    f,
+                    "{color}-{line}{reset}",
+                    color = termion::color::Fg(termion::color::Red),
+                    reset = termion::color::Fg(termion::color::Reset),
+                )?;
+            } else if let Some(line) = line.strip_prefix("-") {
+                writeln!(
+                    f,
+                    "{color}+{line}{reset}",
+                    color = termion::color::Fg(termion::color::Green),
+                    reset = termion::color::Fg(termion::color::Reset),
+                )?;
+            } else {
+                writeln!(f, "{line}")?;
+            }
+        }
+        Ok(())
+    })
+}
+
 // TODO git log the commit directly and do the parsing of the hunks before
 // initiating a rebase at all.
 // Then do the revert commit and then create all the hunks afterwards, except
@@ -309,6 +334,7 @@ fn main() -> Result<()> {
 
             #[derive(Hash, Default)]
             struct UiState {
+                force_redraw_gen: u64,
                 allow_partial: bool,
                 active_mode: UiMode,
                 previous_modes: Vec<UiMode>,
@@ -386,7 +412,7 @@ fn main() -> Result<()> {
                 let mut draw_buffer = String::new();
                 let mut out_buffer = String::new();
                 use std::fmt::Write;
-                'ui_loop: loop {
+                'ui_loop: for gen in 1.. {
                     let should_redraw = {
                         let hash = ui_state.meow_hash();
                         if hash != prev_hash {
@@ -484,28 +510,15 @@ fn main() -> Result<()> {
                                         .into_or_display(""),
                                     reset = termion::color::Fg(termion::color::Reset),
                                 )?;
-                                for line in hunk.split('\n').take(
-                                    (terminal_height as usize)
-                                        .saturating_sub(ui_state.messages.len() + 5),
-                                ) {
-                                    if let Some(line) = line.strip_prefix("+") {
-                                        writeln!(
-                                            draw_buffer,
-                                            "{color}-{line}{reset}",
-                                            color = termion::color::Fg(termion::color::Red),
-                                            reset = termion::color::Fg(termion::color::Reset),
-                                        )?;
-                                    } else if let Some(line) = line.strip_prefix("-") {
-                                        writeln!(
-                                            draw_buffer,
-                                            "{color}+{line}{reset}",
-                                            color = termion::color::Fg(termion::color::Green),
-                                            reset = termion::color::Fg(termion::color::Reset),
-                                        )?;
-                                    } else {
-                                        writeln!(draw_buffer, "{line}")?;
-                                    }
-                                }
+                                writeln!(
+                                    draw_buffer,
+                                    "{}",
+                                    render_hunk(
+                                        hunk,
+                                        (terminal_height as usize)
+                                            .saturating_sub(ui_state.messages.len() + 5)
+                                    )
+                                )?;
                             }
                         }
 
@@ -590,19 +603,32 @@ fn main() -> Result<()> {
                                 termion::event::Key::Ctrl('f') => {
                                     ui_state.allow_partial = !ui_state.allow_partial;
                                 }
-                                termion::event::Key::Ctrl('p') => {
+                                termion::event::Key::Char('p') => {
+                                    let pager = std::env::var("PAGER").ok();
                                     let _ = spawn_with_input(
-                                        &mut Command::new(
-                                            std::env::var("PAGER")
-                                                .unwrap_or_else(|_| "less".to_string()),
-                                        ),
+                                        &mut Command::new("sh").args(&[
+                                            "-c",
+                                            pager
+                                                .as_ref()
+                                                .map(|s| s.as_str())
+                                                .unwrap_or_else(|| "less"),
+                                        ]),
                                         |stdin| {
                                             let (header, hunk_body) = &hunks[active_hunk];
-                                            write!(stdin, "{header}\n{hunk_body}")?;
+                                            writeln!(stdin, "{header}")?;
+                                            write!(
+                                                stdin,
+                                                "{}",
+                                                render_hunk(hunk_body, usize::MAX,)
+                                            )?;
                                             Ok(())
                                         },
                                     )
-                                    .and_then(|mut child| Ok(child.wait()?));
+                                    .and_then(|mut child| {
+                                        child.wait()?;
+                                        ui_state.force_redraw_gen = gen;
+                                        Ok(())
+                                    });
                                 }
                                 // TODO for editor?
                                 // TODO allow splitting a hunk?
