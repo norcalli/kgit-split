@@ -188,7 +188,7 @@ fn rev_parse(input: impl AsRef<str>) -> Result<String> {
 
 fn render_hunk(hunk: &str, max_lines: usize) -> impl std::fmt::Display + '_ {
     FmtFn(move |f| {
-        for line in hunk.split('\n').take(max_lines) {
+        for line in hunk.lines().take(max_lines) {
             if let Some(line) = line.strip_prefix("+") {
                 writeln!(
                     f,
@@ -216,6 +216,7 @@ fn render_hunk(hunk: &str, max_lines: usize) -> impl std::fmt::Display + '_ {
 // Then do the revert commit and then create all the hunks afterwards, except
 // without the reverse flag.
 fn main() -> Result<()> {
+    env_logger::init();
     let opts = opts();
     match opts {
         Opts::Initial { commit } => {
@@ -237,7 +238,7 @@ fn main() -> Result<()> {
         Opts::RebaseTodo { todo, commit } => {
             let raw_todo = std::fs::read_to_string(&todo)?;
             let rebase_commands = raw_todo
-                .split('\n')
+                .lines()
                 .filter(|line| !(line.starts_with('#') || line.is_empty()))
                 .collect::<Vec<_>>();
             let exe = std::env::current_exe()?.display().to_string();
@@ -451,7 +452,7 @@ fn main() -> Result<()> {
                             writeln!(
                                 draw_buffer,
                                 "{color}{id}: {commit_message}{reset}",
-                                commit_message = commit_message.split('\n').next().unwrap(),
+                                commit_message = commit_message.lines().next().unwrap(),
                                 color = commit_colors
                                     .entry(*id)
                                     .or_insert_with(|| commit_colors_seq.next())
@@ -492,14 +493,14 @@ fn main() -> Result<()> {
                                                 "[{commit}] {}",
                                                 messages[&commit]
                                                     .commit_message
-                                                    .split('\n')
+                                                    .lines()
                                                     .next()
                                                     .unwrap()
                                             )
                                         })
                                     })
                                     .into_or_display("---");
-                                let header_line = header.split('\n').next().unwrap();
+                                let header_line = header.lines().next().unwrap();
                                 writeln!(
                                     draw_buffer,
                                     "{active_hunk}/{n}: {color}{commit_message}{reset}\n{header_line}",
@@ -696,7 +697,7 @@ fn main() -> Result<()> {
                                 Ok(())
                             },
                         )?;
-                        for line in output.split('\n') {
+                        for line in output.lines() {
                             if let Some(file) = line.strip_prefix("patching file ") {
                                 let file = file.trim_end();
                                 dbg!(file);
