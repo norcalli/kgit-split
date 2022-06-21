@@ -176,6 +176,10 @@ fn rev_parse(input: impl AsRef<str>) -> Result<String> {
     //     Ok(s)
 }
 
+// TODO git log the commit directly and do the parsing of the hunks before
+// initiating a rebase at all.
+// Then do the revert commit and then create all the hunks afterwards, except
+// without the reverse flag.
 fn main() -> Result<()> {
     let opts = opts();
     match opts {
@@ -202,7 +206,7 @@ fn main() -> Result<()> {
                 .filter(|line| !(line.starts_with('#') || line.is_empty()))
                 .collect::<Vec<_>>();
             let exe = std::env::current_exe()?.display().to_string();
-            eprintln!("{commit:?} {rebase_commands:#?}");
+            log::debug!("{commit:?} {rebase_commands:#?}");
             let hunk_mode = Mode::HunkSplit;
             std::fs::write(
                 &todo,
@@ -216,7 +220,7 @@ fn main() -> Result<()> {
             // assert!(commit.starts_with(rebase_commands[0].split(' ').nth(1).unwrap()));
         }
         Opts::HunkSplit { commit } => {
-            eprintln!("hunk splitting {commit:?}");
+            log::debug!("hunk splitting {commit:?}");
             get_output(Command::new("git").args(&["revert", "--no-commit", &commit]))?;
             // Command::new("git")
             //     .args(&["revert", "--no-commit", "HEAD"])
@@ -226,7 +230,7 @@ fn main() -> Result<()> {
             //     .ok_or_else(|| anyhow!(
             //     ;
             let raw_hunks = get_output(Command::new("sh").arg("-c").arg("yes n | git reset -p"))?;
-            eprintln!("{raw_hunks}\n\n");
+            log::debug!("{raw_hunks}\n\n");
             let regex = Regex::new(
                 // r#"(diff .+\nindex.+\n\-\-\-.+\n\+\+\+.+)(?:(?s)(@@ \-\d+,\d+ \+\d+,\d+ @@(.+?)\(\d+/\d+\) Unstage [^.]+?\? )+)"#,
                 // r#"(diff .+\nindex.+\n\-\-\-.+\n\+\+\+.+)|(?s)(@@ \-\d+,\d+ \+\d+,\d+ @@.+?)\(\d+/\d+\) Unstage [^.]+?\? "#,
@@ -237,7 +241,7 @@ fn main() -> Result<()> {
             for cap in regex.captures_iter(&raw_hunks) {
                 if let Some(header) = cap.get(1) {
                     let header = header.as_str();
-                    eprintln!("File: {header:?}");
+                    log::debug!("File: {header:?}");
                     files.push((header, Vec::new()));
                 }
                 if let Some(hunk) = cap.get(2) {
