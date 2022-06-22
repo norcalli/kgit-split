@@ -132,6 +132,12 @@ fn git() -> Command {
     Command::new("git")
 }
 
+fn sh(command: &str) -> Command {
+    let mut cmd = Command::new("sh");
+    cmd.args(&["-c", command]);
+    cmd
+}
+
 fn get_output(command: &mut Command) -> Result<String> {
     let output = command.output()?;
     anyhow::ensure!(
@@ -215,6 +221,20 @@ fn render_hunk(hunk: &str, max_lines: usize) -> impl std::fmt::Display + '_ {
     })
 }
 
+fn edit(content: impl AsRef<[u8]>) -> Result<String> {
+    let editor = std::env::var("EDITOR").or_else(|_| std::env::var("VISUAL"))?;
+    let path: PathBuf = std::env::temp_dir().join(".gitsplit_edit");
+    std::fs::write(&path, content)?;
+    let mut child = sh(&format!("{editor} {path:?}", path = path.display())).spawn()?;
+    child.wait()?;
+    Ok(std::fs::read_to_string(&path)?)
+}
+
+// fn edit_or_original(content: impl std::fmt::Display) -> String {
+//     let content = content.to_string();
+//     edit(&content).unwrap_or(content)
+// }
+
 // TODO git log the commit directly and do the parsing of the hunks before
 // initiating a rebase at all.
 // Then do the revert commit and then create all the hunks afterwards, except
@@ -261,8 +281,14 @@ fn main() -> Result<()> {
         }
         Opts::HunkSplit { commit } => {
             log::debug!("hunk splitting {commit:?}");
-            let raw_hunks =
-                get_output(git().args(&["diff", "-p", "-U1", &format!("{commit}~"), &commit]))?;
+            let diff_context_size = 0;
+            let raw_hunks = get_output(git().args(&[
+                "diff",
+                "-p",
+                &format!("-U{diff_context_size}"),
+                &format!("{commit}~"),
+                &commit,
+            ]))?;
             let original_commit_message = get_output(git().args(&[
                 "log",
                 "--reverse",
@@ -270,7 +296,7 @@ fn main() -> Result<()> {
                 &format!("{commit}~..{commit}"),
             ]))?;
             log::debug!("{raw_hunks:?}\n\n");
-            let hunk_start_pat = Regex::new(r#"@@ \-\d+(?:,\d+)? \+\d+,\d+ @@"#)?;
+            let hunk_start_pat = Regex::new(r#"@@ \-\d+(?:,\d+)? \+\d+(?:,\d+)? @@"#)?;
             let diff_start_pat = Regex::new(r#"diff .*"#)?;
             let mut files = Vec::new();
             {
@@ -339,7 +365,12 @@ fn main() -> Result<()> {
             //                      }
             //                  }))
             // }
-            get_output(Command::new("git").args(&["revert", "--no-edit", &commit]))?;
+            get_output(git().args(&["revert", "--no-commit", &commit]))?;
+            get_output(git().args(&[
+                "commit",
+                "-m",
+                &format!("@split Revert {commit}: {original_commit_message}"),
+            ]))?;
             type CommitId = char;
             #[derive(Hash, Debug)]
             enum UiMode {
@@ -368,6 +399,7 @@ fn main() -> Result<()> {
 
             #[derive(Hash, Default)]
             struct UiState {
+                dont_save: bool,
                 files: Vec<(String, Vec<String>)>,
                 force_redraw_gen: u64,
                 force_redraw_terminal_size: (u16, u16),
@@ -402,7 +434,7 @@ fn main() -> Result<()> {
                 }
 
                 pub fn should_save_commits(&self) -> bool {
-                    self.allow_partial || self.all_hunks_assigned()
+                    !self.dont_save && (self.allow_partial || self.all_hunks_assigned())
                 }
 
                 pub fn set_hunk_commit(&mut self, hunk_idx: usize, commit_id: CommitId) {
@@ -609,17 +641,31 @@ fn main() -> Result<()> {
                         UiMode::WaitingToEdit => {
                             ui_state.pop_mode();
                             match key {
-                                termion::event::Key::Char(c @ '0'..='9') => {
-                                    let mode = UiMode::Editing {
-                                        commit: c,
-                                        message: ui_state
-                                            .messages
-                                            .get(&c)
-                                            .map(|info| info.commit_message.chars().collect_vec())
-                                            .unwrap_or_default(),
-                                        assign_to_hunk: None,
-                                    };
-                                    ui_state.push_mode(mode);
+                                termion::event::Key::Char(commit @ '0'..='9') => {
+                                    let message = ui_state
+                                        .messages
+                                        .get(&commit)
+                                        .as_ref()
+                                        .map(|info| info.commit_message.as_str())
+                                        .unwrap_or("");
+                                    if let Ok(new_message) = edit(message) {
+                                        ui_state.messages.insert(
+                                            commit,
+                                            CommitInfo {
+                                                commit_message: new_message,
+                                            },
+                                        );
+                                    }
+                                    // let mode = UiMode::Editing {
+                                    //     commit: c,
+                                    //     message: ui_state
+                                    //         .messages
+                                    //         .get(&c)
+                                    //         .map(|info| info.commit_message.chars().collect_vec())
+                                    //         .unwrap_or_default(),
+                                    //     assign_to_hunk: None,
+                                    // };
+                                    // ui_state.push_mode(mode);
                                 }
                                 _ => (),
                             }
@@ -677,39 +723,24 @@ fn main() -> Result<()> {
                                 }
                                 // https://github.com/twaugh/patchutils/blob/master/src/rediff.c
                                 termion::event::Key::Ctrl('e') => {
-                                    if let Ok(editor) =
-                                        std::env::var("EDITOR").or_else(|_| std::env::var("VISUAL"))
-                                    {
-                                        let path: PathBuf = "/tmp/.gitsplit_edit".into();
-                                        loop {
-                                            let ((file_id, _), (_, hunk_body)) =
-                                                ui_state.get_hunk(active_hunk).unwrap();
-                                            if let Ok(output) = {
-                                                std::fs::write(&path, hunk_body)
-                                                    .map_err(|err| err.into())
-                                                    .and_then(|_| -> Result<String> {
-                                                        let mut child = Command::new("sh")
-                                                            .args(&[
-                                                                "-c",
-                                                                &format!(
-                                                                    "{editor} {path:?}",
-                                                                    path = path.display()
-                                                                ),
-                                                            ])
-                                                            .spawn()?;
-                                                        child.wait()?;
-                                                        Ok(std::fs::read_to_string(&path)?)
-                                                    })
-                                            } {
-                                                if output.trim().is_empty() {
-                                                    break;
-                                                }
-
+                                    let launched_editor = loop {
+                                        let ((file_id, _), (_, hunk_body)) =
+                                            ui_state.get_hunk(active_hunk).unwrap();
+                                        match edit(hunk_body) {
+                                            Ok(output) if output.trim().is_empty() => break true,
+                                            Ok(output) => {
                                                 ui_state.files[file_id].1.push(output);
-                                            } else {
-                                                break;
+                                            }
+                                            Err(err) => {
+                                                log::error!("Failed to edit hunk body {err:?}");
+                                                break false;
                                             }
                                         }
+                                    };
+                                    if launched_editor {
+                                        // Works because we're always appending the
+                                        // hunks after the original, so the hunk id
+                                        // is preserved up to active_hunk.
                                         let ((file_id, hunk_id), _) =
                                             ui_state.get_hunk(active_hunk).unwrap();
 
@@ -725,13 +756,10 @@ fn main() -> Result<()> {
                                 termion::event::Key::Char('p') => {
                                     let pager = std::env::var("PAGER").ok();
                                     let _ = spawn_with_input(
-                                        &mut Command::new("sh").args(&[
-                                            "-c",
-                                            pager
-                                                .as_ref()
-                                                .map(|s| s.as_str())
-                                                .unwrap_or_else(|| "less"),
-                                        ]),
+                                        &mut sh(pager
+                                            .as_ref()
+                                            .map(|s| s.as_str())
+                                            .unwrap_or_else(|| "less")),
                                         |stdin| {
                                             let (_, (header, hunk_body)) =
                                                 ui_state.get_hunk(active_hunk).unwrap();
@@ -759,6 +787,7 @@ fn main() -> Result<()> {
                                     break 'ui_loop;
                                 }
                                 termion::event::Key::Char('q') => {
+                                    ui_state.dont_save = true;
                                     break 'ui_loop;
                                 }
                                 termion::event::Key::Char(c @ '0'..='9') => {
@@ -801,13 +830,18 @@ fn main() -> Result<()> {
             // until the user edits an empty file.
             // That way can split a hunk even further
             if ui_state.should_save_commits() {
+                let file_lookup: Vec<usize> = ui_state
+                    .hunks()
+                    .map(|((file_id, _), _)| file_id)
+                    .collect_vec();
                 let hunks = ui_state
                     .hunks()
-                    .map(|(_, (a, b))| (a.to_string(), b.to_string()))
+                    .map(|(_, (_, b))| b.to_string())
                     .collect_vec();
                 let hunks_for_commit: BTreeMap<CommitId, Vec<usize>> = ui_state
                     .hunk_commits
-                    .into_iter()
+                    .iter()
+                    .copied()
                     .enumerate()
                     .flat_map(|(hunk_id, commit_id)| Some((commit_id?, hunk_id)))
                     .into_group_map()
@@ -816,19 +850,30 @@ fn main() -> Result<()> {
                 for (commit_id, hunk_ids) in hunks_for_commit.into_iter() {
                     let CommitInfo { commit_message } = &ui_state.messages[&commit_id];
                     log::debug!("Writing commit {commit_message}");
-                    for hunk_id in hunk_ids.into_iter() {
+                    for (file_id, hunk_ids) in &hunk_ids
+                        .into_iter()
+                        .group_by(|hunk_id| file_lookup[dbg!(*hunk_id)])
+                    {
                         let output = get_output_with_input(
-                            Command::new("git").args(&["apply", "--reject"]),
-                            // Command::new("git").args(&["apply", "--reject", "--recount"]),
+                            &mut {
+                                let mut cmd = git();
+                                cmd.args(&["apply", "--reject"]);
+                                if diff_context_size == 0 {
+                                    cmd.arg("--unidiff-zero");
+                                }
+                                cmd
+                            },
+                            // git().args(&["apply", "--reject", "--recount"]),
                             |stdin| {
-                                let (header, hunk_body) = &hunks[hunk_id];
-                                // The extra line is for reasons.
-                                // All lines must start with ' ' or '+' or '-'
-                                writeln!(stdin, "{header}\n{hunk_body}")?;
-                                // write!(stdin, "{header}\n{hunk_body}\n ")?;
-                                // write!(stdin, "{header}\n{hunk_body}")?;
-                                log::debug!("{header:?}\n{hunk_body:?}");
-                                log::debug!("{header}\n{hunk_body}");
+                                let (header, _) = &ui_state.files[file_id];
+                                writeln!(stdin, "{header}")?;
+                                log::debug!("HEADER: {header:?}");
+                                // TODO sort by line numbers?
+                                for hunk_id in hunk_ids {
+                                    let hunk_body = &hunks[hunk_id];
+                                    log::debug!("BODY: {header:?}");
+                                    writeln!(stdin, "{hunk_body}")?;
+                                }
                                 stdin.flush()?;
                                 Ok(())
                             },
@@ -837,18 +882,22 @@ fn main() -> Result<()> {
                             if let Some(file) = line.strip_prefix("patching file ") {
                                 let file = file.trim_end();
                                 dbg!(file);
-                                get_output(Command::new("git").args(&["add", file]))?;
+                                get_output(git().args(&["add", file]))?;
                             }
                         }
-                        get_output(Command::new("git").args(&["add", "-u"]))?;
+                        get_output(git().args(&["add", "-u"]))?;
                     }
-                    get_output(Command::new("git").args(&["commit", "-m", commit_message]))?;
+                    get_output(git().args(&["commit", "-m", commit_message]))?;
+                }
+                // Sanity check
+                if ui_state.all_hunks_assigned() {
+                    get_output(git().args(&["diff", "--quiet", &commit]))?;
                 }
                 // get_output(
-                //     Command::new("git").args(&["rebase", "--continue"]),
+                //     git().args(&["rebase", "--continue"]),
                 // )?;
             } else {
-                get_output(Command::new("git").args(&["rebase", "--abort"]))?;
+                get_output(git().args(&["rebase", "--abort"]))?;
                 // anyhow::bail!("Not all hunks assigned");
             }
         }
