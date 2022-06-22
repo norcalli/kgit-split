@@ -895,7 +895,13 @@ fn main() -> Result<()> {
                 }
                 // Sanity check
                 if ui_state.all_hunks_assigned() {
-                    get_output(git().args(&["diff", "--quiet", &commit]))?;
+                    if let Err(err) = get_output(git().args(&["diff", "--quiet", &commit])) {
+                        log::error!(
+                            "Failed sanity check diff, even though all hunks were assigned.\n\
+                            Error: {err:?}"
+                        );
+                        return Err(err);
+                    }
                 }
                 // get_output(
                 //     git().args(&["rebase", "--continue"]),
