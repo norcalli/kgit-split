@@ -66,6 +66,7 @@ env_vars! {
     @ENV_TARGET_COMMIT;
     // @ENV_MERGE_BASE;
     @ENV_MODE;
+    @ENV_CONTEXT_SIZE;
     GIT_SEQUENCE_EDITOR;
 }
 
@@ -281,7 +282,10 @@ fn main() -> Result<()> {
         }
         Opts::HunkSplit { commit } => {
             log::debug!("hunk splitting {commit:?}");
-            let diff_context_size = 0;
+            let diff_context_size = std::env::var(ENV_CONTEXT_SIZE)
+                .map_err(|err| anyhow::anyhow!("{err:?}"))
+                .and_then(|s| Ok(s.parse::<usize>()?))
+                .unwrap_or(1);
             let raw_hunks = get_output(git().args(&[
                 "diff",
                 "-p",
