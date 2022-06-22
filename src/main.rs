@@ -6,7 +6,8 @@ use fmt::*;
 use anyhow::{Context, Result};
 use itertools::Itertools;
 use regex::Regex;
-use std::io::{stdout, Write};
+use std::fmt::Write as _;
+use std::io::{stdout, Write as _};
 use std::path::PathBuf;
 use std::process::Command;
 
@@ -127,6 +128,10 @@ fn vec_to_utf8(s: Vec<u8>) -> String {
     String::from_utf8(s).unwrap_or_else(|e| String::from_utf8_lossy(e.as_bytes()).into_owned())
 }
 
+fn git() -> Command {
+    Command::new("git")
+}
+
 fn get_output(command: &mut Command) -> Result<String> {
     let output = command.output()?;
     anyhow::ensure!(
@@ -134,9 +139,7 @@ fn get_output(command: &mut Command) -> Result<String> {
         "Failed to run {command:?}:\n{}",
         vec_to_utf8(output.stderr)
     );
-    let mut s = vec_to_utf8(output.stdout);
-    s.truncate(s.trim_end().len());
-    Ok(s)
+    Ok(vec_to_utf8(output.stdout))
 }
 
 fn get_output_with_input(
@@ -152,9 +155,7 @@ fn get_output_with_input(
         "Failed to run {command:?}:\n{}",
         vec_to_utf8(output.stderr)
     );
-    let mut s = vec_to_utf8(output.stdout);
-    s.truncate(s.trim_end().len());
-    Ok(s)
+    Ok(vec_to_utf8(output.stdout))
 }
 
 fn spawn_with_input(
@@ -173,34 +174,37 @@ fn spawn_with_input(
     Ok(child)
 }
 
-fn rev_parse(input: impl AsRef<str>) -> Result<String> {
-    get_output(Command::new("git").arg("rev-parse").arg(input.as_ref()))
+trait StringExt {
+    fn truncate_end(&mut self) -> &mut Self;
+}
+impl StringExt for String {
+    fn truncate_end(&mut self) -> &mut Self {
+        self.truncate(self.trim_end().len());
+        self
+    }
+}
 
-    //     let output = Command::new("git")
-    //         .arg("rev-parse")
-    //         .arg(input.as_ref())
-    //         .output()?;
-    //     anyhow::ensure!(output.status.success(), "{}", vec_to_utf8(output.stderr));
-    //     let mut s = vec_to_utf8(output.stdout);
-    //     s.truncate(s.trim_end().len());
-    //     Ok(s)
+fn rev_parse(input: impl AsRef<str>) -> Result<String> {
+    let mut s = get_output(git().arg("rev-parse").arg(input.as_ref()))?;
+    s.truncate_end();
+    Ok(s)
 }
 
 fn render_hunk(hunk: &str, max_lines: usize) -> impl std::fmt::Display + '_ {
     FmtFn(move |f| {
-        for line in hunk.lines().take(max_lines) {
+        for line in hunk.split('\n').take(max_lines) {
             if let Some(line) = line.strip_prefix("+") {
                 writeln!(
                     f,
-                    "{color}-{line}{reset}",
-                    color = termion::color::Fg(termion::color::Red),
+                    "{color}+{line}{reset}",
+                    color = termion::color::Fg(termion::color::Green),
                     reset = termion::color::Fg(termion::color::Reset),
                 )?;
             } else if let Some(line) = line.strip_prefix("-") {
                 writeln!(
                     f,
-                    "{color}+{line}{reset}",
-                    color = termion::color::Fg(termion::color::Green),
+                    "{color}-{line}{reset}",
+                    color = termion::color::Fg(termion::color::Red),
                     reset = termion::color::Fg(termion::color::Reset),
                 )?;
             } else {
@@ -226,7 +230,7 @@ fn main() -> Result<()> {
             // let rebase_commit = &prev_commit;
             let rebase_commit = &commit;
             let exe = std::env::current_exe()?.display().to_string();
-            anyhow::ensure!(Command::new("git")
+            anyhow::ensure!(git()
                 .args(&["rebase", "-i", rebase_commit])
                 .env(GIT_SEQUENCE_EDITOR, &exe)
                 .env(ENV_TARGET_COMMIT, &commit)
@@ -238,7 +242,7 @@ fn main() -> Result<()> {
         Opts::RebaseTodo { todo, commit } => {
             let raw_todo = std::fs::read_to_string(&todo)?;
             let rebase_commands = raw_todo
-                .lines()
+                .split('\n')
                 .filter(|line| !(line.starts_with('#') || line.is_empty()))
                 .collect::<Vec<_>>();
             let exe = std::env::current_exe()?.display().to_string();
@@ -257,50 +261,85 @@ fn main() -> Result<()> {
         }
         Opts::HunkSplit { commit } => {
             log::debug!("hunk splitting {commit:?}");
-            get_output(Command::new("git").args(&["revert", "--no-commit", &commit]))?;
-            // Command::new("git")
-            //     .args(&["revert", "--no-commit", "HEAD"])
-            //     .output()?
-            //     .success()
-            //     .then(|| )
-            //     .ok_or_else(|| anyhow!(
-            //     ;
-            let raw_hunks = get_output(Command::new("sh").arg("-c").arg("yes n | git reset -p"))?;
-            log::debug!("{raw_hunks}\n\n");
-            let regex = Regex::new(
-                // r#"(diff .+\nindex.+\n\-\-\-.+\n\+\+\+.+)(?:(?s)(@@ \-\d+,\d+ \+\d+,\d+ @@(.+?)\(\d+/\d+\) Unstage [^.]+?\? )+)"#,
-                // r#"(diff .+\nindex.+\n\-\-\-.+\n\+\+\+.+)|(?s)(@@ \-\d+,\d+ \+\d+,\d+ @@.+?)\(\d+/\d+\) Unstage [^.]+?\? "#,
-                // r#"(diff .+\nindex.+(?:\n[^@][^@].+)+)|(?s)(@@ \-\d+,\d+ \+\d+,\d+ @@)(.+?)\(\d+/\d+\) Unstage [^.]+?\? "#,
-                r#"(diff .+(?:\n[^@][^@].+)+)|(?s)(@@ \-\d+,\d+ \+\d+,\d+ @@.+?)\(\d+/\d+\) Unstage [^.]+?\? "#,
-            )?;
+            let raw_hunks =
+                get_output(git().args(&["diff", "-p", "-U1", &format!("{commit}~"), &commit]))?;
+            let original_commit_message = get_output(git().args(&[
+                "log",
+                "--reverse",
+                "--pretty=format:%B",
+                &format!("{commit}~..{commit}"),
+            ]))?;
+            log::debug!("{raw_hunks:?}\n\n");
+            let hunk_start_pat = Regex::new(r#"@@ \-\d+(?:,\d+)? \+\d+,\d+ @@"#)?;
+            let diff_start_pat = Regex::new(r#"diff .*"#)?;
             let mut files = Vec::new();
-            for cap in regex.captures_iter(&raw_hunks) {
-                if let Some(header) = cap.get(1) {
-                    let header = header.as_str();
-                    log::debug!("File: {header:?}");
-                    files.push((header, Vec::new()));
+            {
+                enum ParseMode {
+                    Hunk,
+                    Header,
                 }
-                if let Some(hunk) = cap.get(2) {
-                    let hunk = hunk.as_str();
-                    files.last_mut().unwrap().1.push(hunk);
-                    // files.last_mut().unwrap().1.push((hunk, cap.get(3).unwrap().as_str()));
+                let mut lines = raw_hunks.split('\n');
+                let mut header = diff_start_pat
+                    .captures(lines.next().expect("diff was empty"))
+                    .expect("First line should be diff in diff")[0]
+                    .to_string();
+                let mut hunks = Vec::new();
+                let mut parse_mode = ParseMode::Header;
+
+                for line in lines {
+                    match parse_mode {
+                        ParseMode::Hunk => {
+                            if let Some(_cap) = diff_start_pat.captures(line) {
+                                files.push((
+                                    std::mem::take(&mut header),
+                                    std::mem::take(&mut hunks),
+                                ));
+                                header.push_str(line);
+                                parse_mode = ParseMode::Header;
+                            } else if let Some(_cap) = hunk_start_pat.captures(line) {
+                                hunks.push(line.to_string());
+                                parse_mode = ParseMode::Hunk;
+                            } else {
+                                write!(hunks.last_mut().unwrap(), "\n{line}").unwrap();
+                                parse_mode = ParseMode::Hunk;
+                            }
+                        }
+                        ParseMode::Header => {
+                            if let Some(_cap) = diff_start_pat.captures(line) {
+                                files.push((
+                                    std::mem::take(&mut header),
+                                    std::mem::take(&mut hunks),
+                                ));
+                                header.push_str(line);
+                                parse_mode = ParseMode::Header;
+                            } else if let Some(_cap) = hunk_start_pat.captures(line) {
+                                hunks.push(line.to_string());
+                                parse_mode = ParseMode::Hunk;
+                            } else {
+                                write!(header, "\n{line}").unwrap();
+                                parse_mode = ParseMode::Header;
+                            }
+                        }
+                    }
+                }
+                if !header.is_empty() {
+                    files.push((std::mem::take(&mut header), std::mem::take(&mut hunks)));
                 }
             }
-            // for (header, hunks) in files.iter() {
-            //     println!("{header}");
-            //     for hunk_body in hunks.iter() {
-            //         print!("{hunk_body}");
-            //     }
-            //     // for (hunk_header, hunk_body) in hunks.iter() {
-            //     //     println!("{hunk_header}");
-            //     //     println!("{hunk_body}");
-            //     // }
+            log::debug!("After parsing {files:#?}");
+            // for (header, hunks) in files.iter_mut() {
+            //     hunks.extend(std::mem::take(&mut hunks).into_iter()
+            //                  .flat_map(|hunk| {
+            //                      if hunk.split('\n').any(|line| line.starts_with("+")) &&
+            //                      hunk.split('\n').any(|line| line.starts_with("-")) {
+            //                          let mut add = Vec::new();
+            //                          let mut rem = Vec::new()kkkkkk
+            //                          for line in hunk.split('\n') {
+            //                          }
+            //                      }
+            //                  }))
             // }
-            get_output(Command::new("git").args(&[
-                "commit",
-                "-m",
-                &format!("Revert {commit} for split"),
-            ]))?;
+            get_output(Command::new("git").args(&["revert", "--no-edit", &commit]))?;
             type CommitId = char;
             #[derive(Hash, Debug)]
             enum UiMode {
@@ -327,15 +366,11 @@ fn main() -> Result<()> {
                 commit_message: String,
             }
 
-            let hunks = files
-                .iter()
-                .flat_map(|(header, hunks)| hunks.iter().map(move |hunk| (header, hunk)))
-                .collect_vec();
-            assert!(!hunks.is_empty());
-
             #[derive(Hash, Default)]
             struct UiState {
+                files: Vec<(String, Vec<String>)>,
                 force_redraw_gen: u64,
+                force_redraw_terminal_size: (u16, u16),
                 allow_partial: bool,
                 active_mode: UiMode,
                 previous_modes: Vec<UiMode>,
@@ -361,13 +396,13 @@ fn main() -> Result<()> {
                     }
                 }
 
-                pub fn all_hunks_assigned(&self, hunk_count: usize) -> bool {
-                    self.hunk_commits.len() == hunk_count
+                pub fn all_hunks_assigned(&self) -> bool {
+                    self.hunk_commits.len() >= self.hunk_count()
                         && self.hunk_commits.iter().all(|c| c.is_some())
                 }
 
-                pub fn should_save_commits(&self, hunk_count: usize) -> bool {
-                    self.allow_partial || self.all_hunks_assigned(hunk_count)
+                pub fn should_save_commits(&self) -> bool {
+                    self.allow_partial || self.all_hunks_assigned()
                 }
 
                 pub fn set_hunk_commit(&mut self, hunk_idx: usize, commit_id: CommitId) {
@@ -376,6 +411,25 @@ fn main() -> Result<()> {
                             .resize_with(hunk_idx + 1, Default::default);
                     }
                     self.hunk_commits[hunk_idx] = Some(commit_id);
+                }
+
+                pub fn hunks(&self) -> impl Iterator<Item = ((usize, usize), (&str, &str))> {
+                    self.files
+                        .iter()
+                        .enumerate()
+                        .flat_map(|(file_id, (header, hunks))| {
+                            hunks.iter().enumerate().map(move |(hunk_id, hunk)| {
+                                ((file_id, hunk_id), (header.as_str(), hunk.as_str()))
+                            })
+                        })
+                }
+
+                pub fn get_hunk(&self, idx: usize) -> Option<((usize, usize), (&str, &str))> {
+                    self.hunks().nth(idx)
+                }
+
+                pub fn hunk_count(&self) -> usize {
+                    self.files.iter().map(|(_, hunks)| hunks.len()).sum()
                 }
             }
             use std::hash::Hash;
@@ -386,7 +440,7 @@ fn main() -> Result<()> {
                 }
             }
             impl<H: Hash> GetHash for H {}
-            {
+            let ui_state = {
                 let mut commit_colors_seq = [
                     termion::color::Fg(termion::color::LightRed).to_string(),
                     termion::color::Fg(termion::color::LightYellow).to_string(),
@@ -404,6 +458,16 @@ fn main() -> Result<()> {
                 let stdin = std::io::stdin();
                 // let mut stdin = termion::async_stdin();
                 let mut ui_state: UiState = Default::default();
+                ui_state.files = files;
+                ui_state.messages.insert(
+                    '0',
+                    CommitInfo {
+                        commit_message: original_commit_message.clone(),
+                    },
+                );
+                ui_state
+                    .hunk_commits
+                    .extend((0..ui_state.hunk_count()).map(|_| Some('0')));
                 let mut prev_hash = 0;
                 let stdout = stdout();
                 let stdout = stdout.into_raw_mode()?;
@@ -412,8 +476,9 @@ fn main() -> Result<()> {
                 let mut keys = stdin.keys();
                 let mut draw_buffer = String::new();
                 let mut out_buffer = String::new();
-                use std::fmt::Write;
                 'ui_loop: for gen in 1.. {
+                    ui_state.force_redraw_terminal_size =
+                        termion::terminal_size().unwrap_or_default();
                     let should_redraw = {
                         let hash = ui_state.meow_hash();
                         if hash != prev_hash {
@@ -424,7 +489,7 @@ fn main() -> Result<()> {
                         }
                     };
                     if should_redraw {
-                        let terminal_height = termion::terminal_size().unwrap_or_default().1;
+                        let terminal_height = ui_state.force_redraw_terminal_size.1;
                         write!(
                             draw_buffer,
                             "{}{}",
@@ -435,7 +500,7 @@ fn main() -> Result<()> {
                             draw_buffer,
                             "{x}/{n} hunks assigned{partial}",
                             x = ui_state.hunk_commits.iter().filter(|h| h.is_some()).count(),
-                            n = hunks.len(),
+                            n = ui_state.hunk_count(),
                             partial = ui_state
                                 .allow_partial
                                 .then(|| FmtFn(|f| {
@@ -452,7 +517,7 @@ fn main() -> Result<()> {
                             writeln!(
                                 draw_buffer,
                                 "{color}{id}: {commit_message}{reset}",
-                                commit_message = commit_message.lines().next().unwrap(),
+                                commit_message = commit_message.split('\n').next().unwrap(),
                                 color = commit_colors
                                     .entry(*id)
                                     .or_insert_with(|| commit_colors_seq.next())
@@ -462,14 +527,14 @@ fn main() -> Result<()> {
                         }
                         match &ui_state.active_mode {
                             UiMode::WaitingToEdit => {
-                                writeln!(draw_buffer, "Enter mode id to edit...",)?;
+                                write!(draw_buffer, "Enter commit id to edit: ",)?;
                             }
                             UiMode::Editing {
                                 commit,
                                 message,
                                 assign_to_hunk: _,
                             } => {
-                                writeln!(
+                                write!(
                                     draw_buffer,
                                     "For {color}{commit}{reset}:\n{message}",
                                     message = message.iter().format(""),
@@ -481,7 +546,8 @@ fn main() -> Result<()> {
                                 )?;
                             }
                             UiMode::Viewing { active_hunk } => {
-                                let (header, hunk) = &hunks[*active_hunk];
+                                let ((_file_id, _hunk_id), (header, hunk)) =
+                                    ui_state.get_hunk(*active_hunk).unwrap();
                                 let commit =
                                     ui_state.hunk_commits.get(*active_hunk).copied().flatten();
                                 let commit_message = commit
@@ -493,18 +559,18 @@ fn main() -> Result<()> {
                                                 "[{commit}] {}",
                                                 messages[&commit]
                                                     .commit_message
-                                                    .lines()
+                                                    .split('\n')
                                                     .next()
                                                     .unwrap()
                                             )
                                         })
                                     })
                                     .into_or_display("---");
-                                let header_line = header.lines().next().unwrap();
+                                let header_line = header.split('\n').next().unwrap();
                                 writeln!(
                                     draw_buffer,
                                     "{active_hunk}/{n}: {color}{commit_message}{reset}\n{header_line}",
-                                    n = hunks.len(),
+                                    n = ui_state.hunk_count(),
                                     color = commit.and_then(|commit| commit_colors
                                         .entry(commit)
                                         .or_insert_with(|| commit_colors_seq.next()).as_ref())
@@ -558,7 +624,7 @@ fn main() -> Result<()> {
                                 _ => (),
                             }
                         }
-                        UiMode::Editing { .. } => match key {
+                        UiMode::Editing { message, .. } => match key {
                             termion::event::Key::Char(c) => match &mut ui_state.active_mode {
                                 UiMode::Editing {
                                     ref mut message, ..
@@ -578,24 +644,26 @@ fn main() -> Result<()> {
                             termion::event::Key::Esc => {
                                 ui_state.pop_mode();
                             }
-                            termion::event::Key::Ctrl('s') => match ui_state.pop_mode() {
-                                Some(UiMode::Editing {
-                                    commit,
-                                    message,
-                                    assign_to_hunk,
-                                }) => {
-                                    ui_state.messages.insert(
+                            termion::event::Key::Ctrl('s') if !message.is_empty() => {
+                                match ui_state.pop_mode() {
+                                    Some(UiMode::Editing {
                                         commit,
-                                        CommitInfo {
-                                            commit_message: String::from_iter(message),
-                                        },
-                                    );
-                                    if let Some(assign_to_hunk) = assign_to_hunk {
-                                        ui_state.set_hunk_commit(assign_to_hunk, commit);
+                                        message,
+                                        assign_to_hunk,
+                                    }) => {
+                                        ui_state.messages.insert(
+                                            commit,
+                                            CommitInfo {
+                                                commit_message: String::from_iter(message),
+                                            },
+                                        );
+                                        if let Some(assign_to_hunk) = assign_to_hunk {
+                                            ui_state.set_hunk_commit(assign_to_hunk, commit);
+                                        }
                                     }
+                                    _ => unreachable!(),
                                 }
-                                _ => unreachable!(),
-                            },
+                            }
                             _ => (),
                         },
                         UiMode::Viewing { active_hunk } => {
@@ -603,6 +671,56 @@ fn main() -> Result<()> {
                             match key {
                                 termion::event::Key::Ctrl('f') => {
                                     ui_state.allow_partial = !ui_state.allow_partial;
+                                }
+                                termion::event::Key::Ctrl('l') => {
+                                    ui_state.force_redraw_gen = gen;
+                                }
+                                // https://github.com/twaugh/patchutils/blob/master/src/rediff.c
+                                termion::event::Key::Ctrl('e') => {
+                                    if let Ok(editor) =
+                                        std::env::var("EDITOR").or_else(|_| std::env::var("VISUAL"))
+                                    {
+                                        let path: PathBuf = "/tmp/.gitsplit_edit".into();
+                                        loop {
+                                            let ((file_id, _), (_, hunk_body)) =
+                                                ui_state.get_hunk(active_hunk).unwrap();
+                                            if let Ok(output) = {
+                                                std::fs::write(&path, hunk_body)
+                                                    .map_err(|err| err.into())
+                                                    .and_then(|_| -> Result<String> {
+                                                        let mut child = Command::new("sh")
+                                                            .args(&[
+                                                                "-c",
+                                                                &format!(
+                                                                    "{editor} {path:?}",
+                                                                    path = path.display()
+                                                                ),
+                                                            ])
+                                                            .spawn()?;
+                                                        child.wait()?;
+                                                        Ok(std::fs::read_to_string(&path)?)
+                                                    })
+                                            } {
+                                                if output.trim().is_empty() {
+                                                    break;
+                                                }
+
+                                                ui_state.files[file_id].1.push(output);
+                                            } else {
+                                                break;
+                                            }
+                                        }
+                                        let ((file_id, hunk_id), _) =
+                                            ui_state.get_hunk(active_hunk).unwrap();
+
+                                        ui_state.files[file_id].1.remove(hunk_id);
+                                        ui_state.hunk_commits.truncate(ui_state.hunk_count());
+                                        let mode = UiMode::Viewing {
+                                            active_hunk: active_hunk
+                                                .min(ui_state.hunk_count().saturating_sub(1)),
+                                        };
+                                        ui_state.set_mode(mode);
+                                    }
                                 }
                                 termion::event::Key::Char('p') => {
                                     let pager = std::env::var("PAGER").ok();
@@ -615,7 +733,8 @@ fn main() -> Result<()> {
                                                 .unwrap_or_else(|| "less"),
                                         ]),
                                         |stdin| {
-                                            let (header, hunk_body) = &hunks[active_hunk];
+                                            let (_, (header, hunk_body)) =
+                                                ui_state.get_hunk(active_hunk).unwrap();
                                             writeln!(stdin, "{header}")?;
                                             write!(
                                                 stdin,
@@ -635,7 +754,7 @@ fn main() -> Result<()> {
                                 // TODO allow splitting a hunk?
                                 // termion::event::Key::Ctrl('e') => {}
                                 termion::event::Key::Ctrl('s')
-                                    if ui_state.should_save_commits(hunks.len()) =>
+                                    if ui_state.should_save_commits() =>
                                 {
                                     break 'ui_loop;
                                 }
@@ -664,7 +783,7 @@ fn main() -> Result<()> {
                                     ui_state.set_mode(mode);
                                 }
                                 termion::event::Key::Right => {
-                                    if (active_hunk + 1) < hunks.len() {
+                                    if (active_hunk + 1) < ui_state.hunk_count() {
                                         let mode = UiMode::Viewing {
                                             active_hunk: active_hunk + 1,
                                         };
@@ -676,28 +795,45 @@ fn main() -> Result<()> {
                         }
                     }
                 } // 'ui_loop
-                if ui_state.should_save_commits(hunks.len()) {
-                    let hunks_for_commit: BTreeMap<CommitId, Vec<usize>> = ui_state
-                        .hunk_commits
-                        .into_iter()
-                        .enumerate()
-                        .flat_map(|(hunk_id, commit_id)| Some((commit_id?, hunk_id)))
-                        .into_group_map()
-                        .into_iter()
-                        .collect();
-                    for (commit_id, hunk_ids) in hunks_for_commit.into_iter() {
-                        let commit_info = &ui_state.messages[&commit_id];
+                ui_state
+            };
+            // TODO repeatedly edit a hunk and produce diffs
+            // until the user edits an empty file.
+            // That way can split a hunk even further
+            if ui_state.should_save_commits() {
+                let hunks = ui_state
+                    .hunks()
+                    .map(|(_, (a, b))| (a.to_string(), b.to_string()))
+                    .collect_vec();
+                let hunks_for_commit: BTreeMap<CommitId, Vec<usize>> = ui_state
+                    .hunk_commits
+                    .into_iter()
+                    .enumerate()
+                    .flat_map(|(hunk_id, commit_id)| Some((commit_id?, hunk_id)))
+                    .into_group_map()
+                    .into_iter()
+                    .collect();
+                for (commit_id, hunk_ids) in hunks_for_commit.into_iter() {
+                    let CommitInfo { commit_message } = &ui_state.messages[&commit_id];
+                    log::debug!("Writing commit {commit_message}");
+                    for hunk_id in hunk_ids.into_iter() {
                         let output = get_output_with_input(
-                            Command::new("patch").args(&["-p1", "-R"]),
+                            Command::new("git").args(&["apply", "--reject"]),
+                            // Command::new("git").args(&["apply", "--reject", "--recount"]),
                             |stdin| {
-                                for hunk_id in hunk_ids.into_iter() {
-                                    let (header, hunk_body) = &hunks[hunk_id];
-                                    write!(stdin, "{header}\n{hunk_body}")?;
-                                }
+                                let (header, hunk_body) = &hunks[hunk_id];
+                                // The extra line is for reasons.
+                                // All lines must start with ' ' or '+' or '-'
+                                writeln!(stdin, "{header}\n{hunk_body}")?;
+                                // write!(stdin, "{header}\n{hunk_body}\n ")?;
+                                // write!(stdin, "{header}\n{hunk_body}")?;
+                                log::debug!("{header:?}\n{hunk_body:?}");
+                                log::debug!("{header}\n{hunk_body}");
+                                stdin.flush()?;
                                 Ok(())
                             },
                         )?;
-                        for line in output.lines() {
+                        for line in output.split('\n') {
                             if let Some(file) = line.strip_prefix("patching file ") {
                                 let file = file.trim_end();
                                 dbg!(file);
@@ -705,19 +841,15 @@ fn main() -> Result<()> {
                             }
                         }
                         get_output(Command::new("git").args(&["add", "-u"]))?;
-                        get_output(Command::new("git").args(&[
-                            "commit",
-                            "-m",
-                            &commit_info.commit_message,
-                        ]))?;
                     }
-                    // get_output(
-                    //     Command::new("git").args(&["rebase", "--continue"]),
-                    // )?;
-                } else {
-                    get_output(Command::new("git").args(&["rebase", "--abort"]))?;
-                    // anyhow::bail!("Not all hunks assigned");
+                    get_output(Command::new("git").args(&["commit", "-m", commit_message]))?;
                 }
+                // get_output(
+                //     Command::new("git").args(&["rebase", "--continue"]),
+                // )?;
+            } else {
+                get_output(Command::new("git").args(&["rebase", "--abort"]))?;
+                // anyhow::bail!("Not all hunks assigned");
             }
         }
     }
