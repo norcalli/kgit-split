@@ -856,7 +856,7 @@ fn main() -> Result<()> {
                     log::debug!("Writing commit {commit_message}");
                     for (file_id, hunk_ids) in &hunk_ids
                         .into_iter()
-                        .group_by(|hunk_id| file_lookup[dbg!(*hunk_id)])
+                        .group_by(|hunk_id| file_lookup[*hunk_id])
                     {
                         let output = get_output_with_input(
                             &mut {
@@ -895,7 +895,7 @@ fn main() -> Result<()> {
                 }
                 // Sanity check
                 if ui_state.all_hunks_assigned() {
-                    if let Err(err) = get_output(git().args(&["diff", "--quiet", &commit])) {
+                    if let Err(err) = get_output(git().args(&["diff", "--check", &commit])) {
                         log::error!(
                             "Failed sanity check diff, even though all hunks were assigned.\n\
                             Error: {err:?}"
